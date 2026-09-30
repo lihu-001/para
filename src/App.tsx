@@ -2,73 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { PromptArea, segmentsToPlainText, type PromptAreaFile, type Segment } from 'prompt-area'
 import 'prompt-area/styles.css'
 import { ArrowUp, ArrowUpRight, CalendarDays, CirclePlus, Eye, EyeOff, FileCheck2, FileText, LayoutDashboard, MessageCircle, PanelRight, Receipt, Search, Send, Settings2, Trash2, Upload, WalletCards, X } from 'lucide-react'
+import { categories, emptySummary, expensePageSize, expenseStatuses, findStatus, loadAvailableInvoices, money, parseMoney, request, sendAgentMessage, statusLabel, today } from './domain'
+import type { AgentConversation, AgentConversationItem, AgentMessage, AgentQueryResult, AgentReply, AgentToolEvent, AIProviderSettings, Allocation, Expense, ExpenseDraft, ExpensePage, ExpenseTableProps, Invoice, InvoiceDraft, ModalKind, PendingAgentAction, Summary } from './domain'
 
-type Expense = { id: string; expense_date: string; amount_minor: number; merchant: string; category: string; status: string }
-type ExpensePage = { items: Expense[]; total: number; page: number; page_size: number }
-type ExpenseTableProps = { refreshKey: number; used: (id: string) => number; onAllocate: (item: Expense) => void; onEdit: (item: Expense) => void; onDelete: (item: Expense) => void; deletingId: string | null }
-type ExpenseDraft = { merchant: string; amount: string; date: string; category: string; status: string }
-type ModalKind = 'expense' | 'editExpense' | 'invoice' | 'allocation'
-type Invoice = { id: string; issue_date: string; amount_minor: number; seller: string; seller_tax_number: string | null; buyer_name: string | null; buyer_tax_number: string | null; invoice_number: string | null; source_pdf: string | null }
-type Allocation = { id: string; expense_id: string; invoice_id: string; amount_minor: number }
-type Summary = { expense_total: number; invoice_total: number; allocated_total: number; uncovered_total: number; pending_total: number }
-type InvoiceDraft = { token: string; seller: string; sellerTaxNumber: string; buyerName: string; buyerTaxNumber: string; amount: string; date: string; number: string; filename: string }
-type AgentAttachment = { name: string; content_type: string; size: number; stored_name: string }
-type AgentConversationItem = { id: string; title: string; created_at?: string; updated_at?: string }
-type AIProviderSettings = { configured: boolean; base_url: string; model: string; models: string[]; retention: string }
-type AgentMessage = { id: string; role: 'user' | 'assistant' | 'tool'; content: string; tool_name: string | null; tool_call_id?: string | null; tool_arguments?: Record<string, unknown>; tool_result?: AgentToolEvent['result']; attachments?: AgentAttachment[]; created_at: string }
-type AgentExpensePreview = { expense_date: string | null; amount_minor: number; merchant: string; category: string }
-type PendingAgentAction = { id: string; action_type: string; preview: { action: string; expense?: AgentExpensePreview & { id?: string }; expenses?: AgentExpensePreview[]; invoices?: { id: string; seller: string; issue_date: string; amount_minor: number }[]; amount_minor?: number; requires_confirmation: boolean }; status: string }
-type AgentConversation = AgentConversationItem & { messages: AgentMessage[]; pending_actions: PendingAgentAction[] }
-type AgentQueryItem = Expense & { allocated_minor: number }
-type AgentQueryResult = { items: AgentQueryItem[]; total: number; amount_minor: number; uncovered_minor: number; filters_applied: Record<string, string | number | boolean | null>; display_limit: number; currency: string }
-type AgentToolEvent = { name: string; arguments: Record<string, unknown>; result: AgentQueryResult | Summary | { pending_action: PendingAgentAction }; tool_call_id: string }
-type AgentReply = { content: string; tool_events: AgentToolEvent[]; pending_action: PendingAgentAction | null }
-
-const categories = ['交通出行', '住宿', '餐饮', '办公用品', '软件订阅', '其他']
-// 报销状态：后端存英文代码，页面一律展示中文名称；顺序即修改弹窗下拉框的顺序，tone 对应 .status 的配色
-const expenseStatuses = [
-  { code: 'NOT_REQUIRED', label: '无需报销', tone: 'slate' },
-  { code: 'SUBMITTED', label: '已提交', tone: 'blue' },
-  { code: 'PAID', label: '已到账', tone: 'green' },
-]
-const findStatus = (code: string) => expenseStatuses.find(item => item.code === code)
-const statusLabel = (code: string) => findStatus(code)?.label ?? `未知状态（${code}）`
-const emptySummary: Summary = { expense_total: 0, invoice_total: 0, allocated_total: 0, uncovered_total: 0, pending_total: 0 }
-const expensePageSize = 10
-const today = () => new Date().toLocaleDateString('en-CA')
-const money = (minor: number) => `¥${(minor / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`
-function parseMoney(value: string) {
-  if (!/^\d+(\.\d{1,2})?$/.test(value) || Number(value) <= 0) throw Error('请输入大于 0 的金额，最多两位小数')
-  const [yuan, fen = ''] = value.split('.')
-  return Number(yuan) * 100 + Number(fen.padEnd(2, '0'))
-}
-async function request<T>(path: string, payload?: object, method?: 'PUT' | 'DELETE'): Promise<T> {
-  const response = await fetch(`/api/${path}`, payload ? { method: method ?? 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : method ? { method } : undefined)
-  if (!response.ok) { const error = await response.json().catch(() => null); throw Error(typeof error?.detail === 'string' ? error.detail : `请求失败 (${response.status})`) }
-  return response.json()
-
-}
-async function sendAgentMessage<T>(path: string, content: string, files: File[], model: string): Promise<T> {
-  const form = new FormData()
-  form.append('content', content)
-  form.append('model', model)
-  files.forEach(file => form.append('files', file))
-  const response = await fetch(`/api/${path}`, { method: 'POST', body: form })
-  if (!response.ok) { const error = await response.json().catch(() => null); throw Error(typeof error?.detail === 'string' ? error.detail : `请求失败 (${response.status})`) }
-  return response.json()
-}
-async function loadAvailableInvoices(page: number, pageSize: number, search: string): Promise<{ items: Invoice[]; total: number }> {
-  try {
-    return await request<{ items: Invoice[]; total: number }>(`invoices/available?page=${page}&page_size=${pageSize}&search=${encodeURIComponent(search)}`)
-  } catch (cause) {
-    if (!(cause instanceof Error) || !cause.message.includes('(404)')) throw cause
-    const [all, allocations] = await Promise.all([request<Invoice[]>('invoices'), request<Allocation[]>('allocations')])
-    const linked = new Set(allocations.map(item => item.invoice_id))
-    const normalizedSearch = search.trim().toLocaleLowerCase()
-    const filtered = all.filter(item => !linked.has(item.id) && item.seller.toLocaleLowerCase().includes(normalizedSearch))
-    return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length }
-  }
-}
 
 function App() {
   const [active, setActive] = useState('仪表盘')
@@ -178,7 +114,7 @@ function App() {
         {active === 'AI 设置' ? <AISettings onSaved={setAiConfigured} /> : active === '发票' ? <InvoiceList refreshKey={ledgerRefresh} onAdd={() => openModal('invoice')} onDelete={setInvoiceToDelete} deletingId={deletingInvoiceId} /> : <>
           {active !== '支出' && <Dashboard expenses={expenses} summary={summary} />}
           {/* 仪表盘与支出页共用同一位置的台账组件，切换两者时不会重新挂载，分页与搜索状态得以保留 */}
-          <ExpenseTable refreshKey={ledgerRefresh} used={expenseUsed} onAllocate={openAllocation} onEdit={openEdit} onDelete={setExpenseToDelete} deletingId={deletingId} />
+          <ExpenseTable refreshKey={ledgerRefresh} used={expenseUsed} onAllocate={openAllocation} onEdit={openEdit} onDelete={setExpenseToDelete} onStatusSaved={() => load(true)} deletingId={deletingId} />
         </>}
       <footer>PARA <span>·</span> Personal AI Reimbursement Assistant <span>·</span> 本地账本</footer>
     </div></main>
@@ -353,7 +289,35 @@ function AgentToolResult({ tool }: { tool: AgentToolEvent }) {
 function Dashboard({ expenses, summary }: { expenses: Expense[]; summary: Summary }) { const coverage = summary.expense_total ? Math.min(100, summary.allocated_total / summary.expense_total * 100) : 0; return <section className="dashboard-grid"><div className="panel trend-panel"><div className="panel-heading"><div><p className="eyebrow">OVERVIEW</p><h2>最新支出</h2></div></div>{expenses.length ? <div className="overview-list">{expenses.map(item => <div className="overview-row" key={item.id}><span>{item.merchant}<small>{item.expense_date} · {item.category}</small></span><b>{money(item.amount_minor)}</b></div>)}</div> : <div className="empty-state">暂无支出记录。</div>}</div><div className="panel invoice-panel"><div className="panel-heading"><div><p className="eyebrow">RECEIPTS</p><h2>发票覆盖率</h2></div></div><div className="donut-area"><div className="donut" style={{ background: `conic-gradient(#4d8e7a 0 ${coverage * 3.6}deg, #e7eeea ${coverage * 3.6}deg)` }}><div><strong>{coverage.toFixed(1)}%</strong><span>已覆盖</span></div></div><div className="legend"><Legend color="green" label="已关联发票" value={money(summary.allocated_total)} /><Legend color="light" label="无发票金额" value={money(summary.uncovered_total)} /></div></div></div></section> }
 function Metric({ label, value, icon, detail }: { label: string; value: number; icon: React.ReactNode; detail: string }) { return <div className="metric-card"><div className="metric-top"><span className="metric-icon">{icon}</span></div><span className="metric-label">{label}</span><strong className="metric-amount">{money(value)}</strong><span className="metric-change">{detail}</span></div> }
 function Legend({ color, label, value }: { color: string; label: string; value: string }) { return <div className="legend-row"><i className={color} /><span>{label}</span><b>{value}</b></div> }
-function ExpenseTable({ refreshKey, used, onAllocate, onEdit, onDelete, deletingId }: ExpenseTableProps) {
+function ExpenseStatusCell({ item, onSaved }: { item: Expense; onSaved: (status: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(item.status)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const savingRef = useRef(false)
+
+  async function save(status: string) {
+    if (savingRef.current) return
+    setEditing(false)
+    if (status === item.status || !findStatus(status)) return
+    savingRef.current = true
+    setSaving(true); setError('')
+    try {
+      await request(`expenses/${encodeURIComponent(item.id)}`, { expense_date: item.expense_date, amount_minor: item.amount_minor, merchant: item.merchant, category: item.category, status }, 'PUT')
+      await onSaved(status)
+    } catch (cause) {
+      setDraft(item.status)
+      setError(cause instanceof Error ? cause.message : '保存报销状态失败')
+    } finally { savingRef.current = false; setSaving(false) }
+  }
+
+  return <><div className="expense-status-editor">{editing ? <select autoFocus aria-label={`${item.merchant} 报销状态`} value={draft} onChange={event => setDraft(event.target.value)} onBlur={event => { void save(event.target.value) }} onKeyDown={event => { if (event.key === 'Escape') { setEditing(false); setDraft(item.status) } }}>
+    {!findStatus(item.status) && <option value={item.status} disabled>请选择报销状态</option>}
+    {expenseStatuses.map(status => <option key={status.code} value={status.code}>{status.label}</option>)}
+  </select> : <button type="button" className={`status status-edit-button ${findStatus(item.status)?.tone ?? 'slate'}`} aria-label={`修改 ${item.merchant} 报销状态`} disabled={saving} onClick={() => { setDraft(item.status); setError(''); setEditing(true) }}>{saving ? '保存中…' : statusLabel(item.status)}</button>}</div>{error && <small role="alert" className="status-save-error">{error}</small>}</>
+}
+
+function ExpenseTable({ refreshKey, used, onAllocate, onEdit, onDelete, onStatusSaved, deletingId }: ExpenseTableProps) {
   // 分页、搜索与加载状态收敛在台账组件内部：翻页只重新渲染这张表，不牵动整个页面
   const [result, setResult] = useState<ExpensePage>({ items: [], total: 0, page: 1, page_size: expensePageSize })
   const [page, setPage] = useState(1)
@@ -380,11 +344,15 @@ function ExpenseTable({ refreshKey, used, onAllocate, onEdit, onDelete, deleting
 
   const updateQuery = (value: string) => { setQuery(value); setPage(1); setLoading(true) }
   const changePage = (value: number) => { setPage(value); setLoading(true) }
+  const statusSaved = async (id: string, status: string) => {
+    setResult(current => ({ ...current, items: current.items.map(item => item.id === id ? { ...item, status } : item) }))
+    await onStatusSaved()
+  }
   const pages = Math.max(1, Math.ceil(result.total / expensePageSize))
   // 重新加载期间保留当前行（配合 is-loading 淡化），避免表格塌成一行“加载中”导致页面高度骤变、看起来像整页刷新
   const rows: Expense[] = error ? [] : result.items
   const placeholder = rows.length ? '' : loading ? '加载中…' : error ? `支出台账加载失败：${error}` : query ? '没有符合条件的支出记录。' : '暂无支出记录。'
-  return <section className="panel table-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">EXPENSES</p><h2>支出台账</h2></div><div className="search-box"><Search size={16} /><input aria-label="搜索支出" placeholder="搜索商户、类别或报销状态" value={query} onChange={event => updateQuery(event.target.value)} /></div></div><div className={`table-scroll ${loading ? 'is-loading' : ''}`} aria-busy={loading}><table><thead><tr><th>日期</th><th>商户</th><th>类别</th><th>金额</th><th>无发票金额</th><th>报销状态</th><th>操作</th></tr></thead><tbody>{rows.map(item => <tr key={item.id}><td className="date-cell">{item.expense_date}</td><td><div className="merchant-cell"><div className="merchant-icon green"><Receipt size={16} /></div><strong>{item.merchant}</strong></div></td><td><span className="category-pill">{item.category}</span></td><td className="amount-cell">{money(item.amount_minor)}</td><td className={item.amount_minor > used(item.id) ? 'invoice-no' : 'invoice-yes'}>{money(item.amount_minor - used(item.id))}</td><td><span className={`status ${findStatus(item.status)?.tone ?? 'slate'}`}>{statusLabel(item.status)}</span></td><td><div className="table-actions"><button type="button" className="table-action" aria-label={`修改 ${item.merchant}`} onClick={() => onEdit(item)}>修改</button><button className="table-action" disabled={used(item.id) >= item.amount_minor} onClick={() => onAllocate(item)}>关联发票</button><button type="button" className="table-action danger" aria-label={`${deletingId === item.id ? '正在删除' : '删除'} ${item.merchant}`} disabled={deletingId !== null} onClick={() => onDelete(item)}>{deletingId === item.id ? '删除中…' : '删除'}</button></div></td></tr>)}</tbody></table>{placeholder && <div className="empty-state" role={!loading && error ? 'alert' : undefined}>{placeholder}</div>}</div><div className="expense-pagination"><span>共 {result.total} 笔 · 第 {page} / {pages} 页</span><div><button type="button" disabled={!!error || page <= 1} onClick={() => changePage(page - 1)}>上一页</button><button type="button" disabled={!!error || page >= pages} onClick={() => changePage(page + 1)}>下一页</button></div></div></section>
+  return <section className="panel table-panel"><div className="panel-heading table-heading"><div><p className="eyebrow">EXPENSES</p><h2>支出台账</h2></div><div className="search-box"><Search size={16} /><input aria-label="搜索支出" placeholder="搜索商户、类别或报销状态" value={query} onChange={event => updateQuery(event.target.value)} /></div></div><div className={`table-scroll ${loading ? 'is-loading' : ''}`} aria-busy={loading}><table><thead><tr><th>日期</th><th>商户</th><th>类别</th><th>金额</th><th>无发票金额</th><th>报销状态</th><th>操作</th></tr></thead><tbody>{rows.map(item => <tr key={item.id}><td className="date-cell">{item.expense_date}</td><td><div className="merchant-cell"><div className="merchant-icon green"><Receipt size={16} /></div><strong>{item.merchant}</strong></div></td><td><span className="category-pill">{item.category}</span></td><td className="amount-cell">{money(item.amount_minor)}</td><td className={item.amount_minor > used(item.id) ? 'invoice-no' : 'invoice-yes'}>{money(item.amount_minor - used(item.id))}</td><td><ExpenseStatusCell item={item} onSaved={status => statusSaved(item.id, status)} /></td><td><div className="table-actions"><button type="button" className="table-action" aria-label={`修改 ${item.merchant}`} onClick={() => onEdit(item)}>修改</button><button className="table-action" disabled={used(item.id) >= item.amount_minor} onClick={() => onAllocate(item)}>关联发票</button><button type="button" className="table-action danger" aria-label={`${deletingId === item.id ? '正在删除' : '删除'} ${item.merchant}`} disabled={deletingId !== null} onClick={() => onDelete(item)}>{deletingId === item.id ? '删除中…' : '删除'}</button></div></td></tr>)}</tbody></table>{placeholder && <div className="empty-state" role={!loading && error ? 'alert' : undefined}>{placeholder}</div>}</div><div className="expense-pagination"><span>共 {result.total} 笔 · 第 {page} / {pages} 页</span><div><button type="button" disabled={!!error || page <= 1} onClick={() => changePage(page - 1)}>上一页</button><button type="button" disabled={!!error || page >= pages} onClick={() => changePage(page + 1)}>下一页</button></div></div></section>
 }
 function InvoiceList({ refreshKey, onAdd, onDelete, deletingId }: { refreshKey: number; onAdd: () => void; onDelete: (invoice: Invoice) => void; deletingId: string | null }) {
   const [result, setResult] = useState<{ items: Invoice[]; total: number }>({ items: [], total: 0 })

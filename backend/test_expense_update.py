@@ -61,6 +61,66 @@ class ExpenseApiTest(unittest.TestCase):
         return self.client.get("/api/summary").json()
 
 
+class ExpenseStatusMigrationTest(ExpenseApiTest):
+    def test_existing_submitted_migrates_once_without_changing_future_submissions(self):
+        old = self.create_expense(merchant="历史已提交")
+        paid = self.create_expense(merchant="已到账", status="PAID")
+        with main.connect() as db:
+            db.execute("DELETE FROM migrations WHERE name = 'submitted-to-not-submitted'")
+
+        main.initialize()
+        self.assertEqual({row["id"]: row["status"] for row in self.stored()},
+                         {old["id"]: "NOT_SUBMITTED", paid["id"]: "PAID"})
+        self.assertEqual(self.summary()["pending_total"], 0)
+
+        new = self.create_expense(merchant="新已提交")
+        self.assertEqual(self.put(old, status="SUBMITTED").status_code, 200)
+        main.initialize()
+        self.assertEqual({row["id"]: row["status"] for row in self.stored()},
+                         {old["id"]: "SUBMITTED", paid["id"]: "PAID", new["id"]: "SUBMITTED"})
+        self.assertEqual(self.summary()["pending_total"], 2000)
+
+    def test_legacy_check_constraint_rebuild_preserves_allocations(self):
+        expense = self.create_expense()
+        self.add_invoice("linked", 500)
+        self.allocate(expense, "linked")
+        with main.connect() as db:
+            db.execute("DELETE FROM migrations WHERE name = 'submitted-to-not-submitted'")
+        with main.connect() as db:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("""CREATE TABLE expenses_old (
+                id TEXT PRIMARY KEY, expense_date TEXT NOT NULL, amount_minor INTEGER NOT NULL,
+                merchant TEXT NOT NULL, category TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('SUBMITTED', 'PAID')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )""")
+            db.execute("INSERT INTO expenses_old SELECT * FROM expenses")
+            db.execute("DROP TABLE expenses")
+            db.execute("ALTER TABLE expenses_old RENAME TO expenses")
+        main.initialize()
+        self.assertEqual(self.stored()[0]["status"], "NOT_SUBMITTED")
+        self.assertEqual(self.client.get("/api/allocations").json()[0]["expense_id"], expense["id"])
+        with main.connect() as db:
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_allocation_works_after_legacy_expenses_table_migration(self):
+        expense = self.create_expense()
+        self.add_invoice("allocatable", 400)
+        with main.connect() as db:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("ALTER TABLE expenses RENAME TO expenses_legacy")
+            db.execute("""CREATE TABLE expenses (
+                id TEXT PRIMARY KEY, expense_date TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+                merchant TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'SUBMITTED', created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )""")
+            db.execute("INSERT INTO expenses SELECT * FROM expenses_legacy")
+            db.execute("DROP TABLE expenses_legacy")
+        main.initialize()
+        self.assertEqual(self.client.post("/api/allocations", json={"expense_id": expense["id"], "invoice_ids": ["allocatable"]}).status_code, 201)
+        with main.connect() as db:
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+
 class ExpenseUpdateTest(ExpenseApiTest):
     def test_updates_all_fields_including_status(self):
         expense = self.create_expense(status="NOT_REQUIRED")
@@ -178,10 +238,11 @@ class ExpenseStatusSearchTest(ExpenseApiTest):
             return {row["id"] for row in self.client.get("/api/expenses", params={"search": search}).json()["items"]}
 
         self.assertEqual(found("已到账"), {paid["id"]})
-        self.assertEqual(found("提交"), {submitted["id"]})
-        self.assertEqual(found("无需报销"), {not_required["id"]})
+        not_submitted = self.create_expense(merchant="丁商户", status="NOT_SUBMITTED")
+        self.assertEqual(found("提交"), {submitted["id"], not_submitted["id"]})
+        self.assertEqual(found("未提交"), {not_submitted["id"]})
         self.assertEqual(found("PAID"), set())
-        self.assertEqual(found(""), {not_required["id"], paid["id"], submitted["id"]})
+        self.assertEqual(found(""), {not_required["id"], paid["id"], submitted["id"], not_submitted["id"]})
 
 
 if __name__ == "__main__":

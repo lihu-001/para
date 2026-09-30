@@ -10,10 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # 报销状态：数据库存英文代码，界面统一展示中文名称。
 EXPENSE_STATUS_LABELS = {
     "NOT_REQUIRED": "无需报销",
+    "NOT_SUBMITTED": "未提交",
     "SUBMITTED": "已提交",
     "PAID": "已到账",
 }
-ExpenseStatus = Literal["NOT_REQUIRED", "SUBMITTED", "PAID"]
+ExpenseStatus = Literal["NOT_REQUIRED", "NOT_SUBMITTED", "SUBMITTED", "PAID"]
 
 
 class ExpenseInput(BaseModel):
@@ -25,7 +26,7 @@ class ExpenseInput(BaseModel):
 
 
 class ExpenseUpdate(BaseModel):
-    """用户在台账中手动调整三种报销状态。"""
+    """用户在台账中手动调整四种报销状态。"""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -164,7 +164,7 @@ describe('支出台账修改', () => {
     const status = within(dialog).getByLabelText('报销状态') as HTMLSelectElement
     expect(status.value).toBe('SUBMITTED')
     // 下拉框只展示中文状态名
-    expect(Array.from(status.options, option => option.textContent)).toEqual(['无需报销', '已提交', '已到账'])
+    expect(Array.from(status.options, option => option.textContent)).toEqual(['无需报销', '未提交', '已提交', '已到账'])
 
     fireEvent.change(within(dialog).getByLabelText('商户名称'), { target: { value: ' 改名商户 ' } })
     fireEvent.change(within(dialog).getByLabelText('金额（元）'), { target: { value: '45.6' } })
@@ -267,11 +267,49 @@ describe('支出台账删除', () => {
 
 describe('报销状态中文展示', () => {
   it('台账中各报销状态都显示中文名，不出现英文代码', async () => {
-    const statuses = { e1: 'NOT_REQUIRED', e2: 'SUBMITTED', e3: 'PAID' }
+    const statuses = { e1: 'NOT_REQUIRED', e2: 'NOT_SUBMITTED', e3: 'SUBMITTED', e4: 'PAID' }
     const { table } = await renderApp({ statuses })
     const label = (merchant: string) => within(table).getByText(merchant).closest('tr')?.querySelector('.status')?.textContent
-    expect(['商户1', '商户2', '商户3', '商户4'].map(label)).toEqual(['无需报销', '已提交', '已到账', '已提交'])
-    expect(table.textContent).not.toMatch(/NOT_REQUIRED|SUBMITTED|PAID/)
+    expect(['商户1', '商户2', '商户3', '商户4'].map(label)).toEqual(['无需报销', '未提交', '已提交', '已到账'])
+    expect(table.textContent).not.toMatch(/NOT_REQUIRED|NOT_SUBMITTED|SUBMITTED|PAID/)
+  })
+  it('点击状态后可选择，点击别处才保存；失败保留原状态并提示', async () => {
+    const { backend, table } = await renderApp()
+    const row = within(table).getByText('商户1').closest('tr') as HTMLElement
+    const statusButton = () => within(row).getByRole('button', { name: '修改 商户1 报销状态' })
+    expect(statusButton().textContent).toBe('已提交')
+    fireEvent.click(statusButton())
+    const selector = within(row).getByRole('combobox', { name: '商户1 报销状态' })
+    fireEvent.change(selector, { target: { value: 'PAID' } })
+    expect(backend.updates).toHaveLength(0)
+    fireEvent.blur(selector)
+    await waitFor(() => expect(backend.updates).toHaveLength(1))
+    expect(backend.updates[0]).toEqual({ path: '/api/expenses/e1', body: { expense_date: '2025-01-01', amount_minor: 100, merchant: '商户1', category: '餐饮', status: 'PAID' } })
+    await waitFor(() => expect(statusButton().textContent).toBe('已到账'))
+    backend.rejectUpdates('无法更新状态')
+    fireEvent.click(statusButton())
+    const second = within(row).getByRole('combobox', { name: '商户1 报销状态' })
+    fireEvent.change(second, { target: { value: 'NOT_SUBMITTED' } })
+    fireEvent.blur(second)
+    await within(row).findByRole('alert')
+    expect(statusButton().textContent).toBe('已到账')
+    expect(within(row).getByRole('alert').textContent).toBe('无法更新状态')
+  })
+
+  it('不修改即失焦不会提交，未知状态必须选择有效状态', async () => {
+    const { backend, table } = await renderApp({ statuses: { e1: 'LEGACY' } })
+    const row = within(table).getByText('商户1').closest('tr') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: '修改 商户1 报销状态' }))
+    const selector = within(row).getByRole('combobox', { name: '商户1 报销状态' }) as HTMLSelectElement
+    expect(selector.value).toBe('LEGACY')
+    fireEvent.blur(selector)
+    expect(backend.updates).toHaveLength(0)
+    fireEvent.click(within(row).getByRole('button', { name: '修改 商户1 报销状态' }))
+    const selected = within(row).getByRole('combobox', { name: '商户1 报销状态' })
+    fireEvent.change(selected, { target: { value: 'NOT_REQUIRED' } })
+    fireEvent.blur(selected)
+    await waitFor(() => expect(backend.updates).toHaveLength(1))
+    await waitFor(() => expect(within(row).getByRole('button', { name: '修改 商户1 报销状态' }).textContent).toBe('无需报销'))
   })
 
   it('修改未知状态的支出时要求重新选择报销状态', async () => {

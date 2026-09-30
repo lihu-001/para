@@ -14,7 +14,7 @@ class AgentError(RuntimeError):
     pass
 
 
-# 三种报销状态及对应中文名称，供模型按代码筛选、按中文回复
+# 四种报销状态及对应中文名称，供模型按代码筛选、按中文回复
 STATUS_HINT = "、".join(f"{code}={label}" for code, label in EXPENSE_STATUS_LABELS.items())
 
 TOOLS = [

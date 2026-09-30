@@ -6,7 +6,6 @@ from pathlib import Path
 import base64
 import json
 import mimetypes
-import sqlite3
 from uuid import uuid4
 from urllib.parse import urlsplit
 
@@ -18,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from .ai_agent import AgentError, run_agent
 from .ai_invoice import AIConfigurationError, parse_invoice_images
+from .database import connect as _connect, initialize as _initialize
 from .services import EXPENSE_STATUS_LABELS, AllocationInput, ExpenseInput, ExpenseUpdate, allocation_plan, create_allocation, create_expense, delete_expense, get_summary, query_expenses, query_invoices, update_expense
 from pydantic import ValidationError
 
@@ -29,71 +29,11 @@ MAX_AGENT_FILES = 5
 MAX_PDF_PAGES = 6
 
 def connect():
-    DB.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
-
+    return _connect(DB)
 
 def initialize():
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    AGENT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    with connect() as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS expenses (
-            id TEXT PRIMARY KEY, expense_date TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
-            merchant TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'SUBMITTED', created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS invoices (
-            id TEXT PRIMARY KEY, issue_date TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK (amount_minor > 0), seller TEXT NOT NULL,
-            invoice_number TEXT, buyer_name TEXT, buyer_tax_number TEXT, seller_tax_number TEXT,
-            source_pdf TEXT, extracted_text TEXT, ai_result_json TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS pending_invoice_pdfs (
-            token TEXT PRIMARY KEY, stored_name TEXT NOT NULL, ai_result_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS allocations (
-            id TEXT PRIMARY KEY, expense_id TEXT NOT NULL REFERENCES expenses(id), invoice_id TEXT NOT NULL REFERENCES invoices(id),
-            amount_minor INTEGER NOT NULL CHECK (amount_minor > 0), UNIQUE (expense_id, invoice_id)
-        );
-        CREATE TABLE IF NOT EXISTS agent_conversations (
-            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '新对话', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS agent_messages (
-            id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
-            role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')), content TEXT NOT NULL,
-            tool_call_id TEXT, tool_calls_json TEXT, tool_name TEXT, tool_arguments_json TEXT, tool_result_json TEXT,
-            attachments_json TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS agent_pending_actions (
-            id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
-            action_type TEXT NOT NULL, arguments_json TEXT NOT NULL, preview_json TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'EXECUTED', 'CANCELLED', 'FAILED')),
-            created_at TEXT NOT NULL DEFAULT (datetime('now')), confirmed_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS ai_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            base_url TEXT NOT NULL DEFAULT 'https://api.openai.com/v1', model TEXT NOT NULL DEFAULT 'gpt-4o-mini',
-            api_key TEXT NOT NULL DEFAULT '', retention TEXT NOT NULL DEFAULT 'keep' CHECK (retention IN ('keep', 'delete_after_confirmation')),
-            models_json TEXT NOT NULL DEFAULT '[]'
-        );
-        INSERT OR IGNORE INTO ai_settings (id) VALUES (1);
-        """)
-        columns = {row[1] for row in db.execute("PRAGMA table_info(invoices)")}
-        for name in ("source_pdf", "extracted_text", "ai_result_json", "buyer_name", "buyer_tax_number", "seller_tax_number"):
-            if name not in columns:
-                db.execute(f"ALTER TABLE invoices ADD COLUMN {name} TEXT")
-        message_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_messages)")}
-        if "attachments_json" not in message_columns:
-            db.execute("ALTER TABLE agent_messages ADD COLUMN attachments_json TEXT")
-        settings_columns = {row[1] for row in db.execute("PRAGMA table_info(ai_settings)")}
-        if "models_json" not in settings_columns:
-            db.execute("ALTER TABLE ai_settings ADD COLUMN models_json TEXT NOT NULL DEFAULT '[]'")
-        # 旧状态并入三种状态；重复启动时仅处理尚未迁移的记录。
-        db.execute("UPDATE expenses SET status = 'SUBMITTED' WHERE status IN ('DRAFT', 'IN_REVIEW', 'RETURNED', 'APPROVED')")
-        db.execute("UPDATE expenses SET status = 'NOT_REQUIRED' WHERE status = 'CANCELLED'")
+    return _initialize(connect, UPLOAD_DIR, AGENT_UPLOAD_DIR)
+
 
 
 
